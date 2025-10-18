@@ -1,0 +1,10 @@
+# app.py
+fastapi
+pydantic  
+typing
+os
+json
+joblib
+pandas
+numpy
+uvicorn
