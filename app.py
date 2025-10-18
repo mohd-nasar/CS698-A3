@@ -9,7 +9,8 @@ import uvicorn
 from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, Body
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware # <--- IMPORT THIS
+
 # Artifacts paths
 ARTIFACT_DIR = "artifacts"
 PIPELINE_PATH = os.path.join(ARTIFACT_DIR, "student_dropout_pipeline_v1.joblib")
