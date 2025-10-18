@@ -1,0 +1,133 @@
+{
+  "model_version": "v1",
+  "saved_at": "2025-10-18T12:47:48.282659Z",
+  "feature_names": [
+    "Application order",
+    "Inflation rate",
+    "Application mode",
+    "GDP",
+    "Unemployment rate",
+    "Course",
+    "Curricular units 1st sem (evaluations)",
+    "Curricular units 2nd sem (evaluations)",
+    "Age at enrollment",
+    "Admission grade",
+    "Curricular units 1st sem (approved)",
+    "Curricular units 1st sem (grade)",
+    "Curricular units 2nd sem (grade)",
+    "Curricular units 2nd sem (approved)"
+  ],
+  "protected_features": [
+    "Gender",
+    "Age at enrollment",
+    "Marital status",
+    "Nacionality",
+    "Displaced",
+    "International",
+    "Mother's qualification",
+    "Father's qualification",
+    "Mother's occupation",
+    "Father's occupation",
+    "Educational special needs",
+    "Debtor",
+    "Tuition fees up to date",
+    "Previous qualification (grade)",
+    "Unemployment rate",
+    "Inflation rate",
+    "GDP"
+  ],
+  "target_label_encoder_classes": [
+    "Dropout",
+    "Graduate"
+  ],
+  "pca": {
+    "n_components_": 11,
+    "explained_variance_ratio_sum": 0.9708706844604612,
+    "explained_variance_ratio": [
+      0.3060789915251692,
+      0.14479397973288874,
+      0.09505734683133045,
+      0.08631113514525202,
+      0.07181529657912678,
+      0.06335113932096369,
+      0.05407078346835091,
+      0.04865065921817487,
+      0.044105797276397095,
+      0.03216040897242627,
+      0.024475146390381234
+    ]
+  },
+  "model": {
+    "type": "XGBClassifier",
+    "params": {
+      "objective": "binary:logistic",
+      "base_score": null,
+      "booster": null,
+      "callbacks": null,
+      "colsample_bylevel": null,
+      "colsample_bynode": null,
+      "colsample_bytree": null,
+      "device": null,
+      "early_stopping_rounds": null,
+      "enable_categorical": false,
+      "eval_metric": "logloss",
+      "feature_types": null,
+      "feature_weights": null,
+      "gamma": null,
+      "grow_policy": null,
+      "importance_type": null,
+      "interaction_constraints": null,
+      "learning_rate": null,
+      "max_bin": null,
+      "max_cat_threshold": null,
+      "max_cat_to_onehot": null,
+      "max_delta_step": null,
+      "max_depth": null,
+      "max_leaves": null,
+      "min_child_weight": null,
+      "missing": NaN,
+      "monotone_constraints": null,
+      "multi_strategy": null,
+      "n_estimators": null,
+      "n_jobs": null,
+      "num_parallel_tree": null,
+      "random_state": 42,
+      "reg_alpha": null,
+      "reg_lambda": null,
+      "sampling_method": null,
+      "scale_pos_weight": 0.6432775011317338,
+      "subsample": null,
+      "tree_method": null,
+      "validate_parameters": null,
+      "verbosity": null
+    }
+  },
+  "metrics": [
+    {
+      "fold": 1,
+      "accuracy": 0.8623063683304647,
+      "f1": 0.8605628006728294
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.8881239242685026,
+      "f1": 0.8877955822243038
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.8657487091222031,
+      "f1": 0.8642263771327973
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.8640275387263339,
+      "f1": 0.8624091323549448
+    },
+    {
+      "fold": 5,
+      "accuracy": 0.8482758620689655,
+      "f1": 0.8473371647509579
+    }
+  ],
+  "notes": "Trained XGBoost model for student dropout prediction with PCA preprocessing."
+}
