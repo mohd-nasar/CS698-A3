@@ -1,8 +1,8 @@
-# app.py
-fastapi
-pydantic  
-typing
-joblib
-pandas
-numpy
-uvicorn
+fastapi>=0.110.0
+pydantic>=2.5.0
+uvicorn>=0.24.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+pandas>=2.1.0
+numpy>=1.26.0
+xgboost>=2.0.0
