@@ -21,8 +21,22 @@ METADATA_PATH = os.path.join(ARTIFACT_DIR, "metadata.json")
 
 app = FastAPI(title="Student Dropout Prediction API")
 
+# ---- CORS Middleware Configuration ----
+origins = [
+    "*",  # Allows all origins
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # Allows all methods
+    allow_headers=["*"], # Allows all headers
+)
+
 # ---- module-level globals (initialized at startup) ----
 ARTIFACTS: dict = {}
+# ... rest of your code
 PIPELINE = None
 ESTIMATOR_ONLY = None
 LABEL_ENCODER = None
