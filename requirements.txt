@@ -2,7 +2,6 @@
 fastapi
 pydantic  
 typing
-os
 json
 joblib
 pandas
