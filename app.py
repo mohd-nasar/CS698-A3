@@ -5,6 +5,7 @@ import json
 import joblib
 import pandas as pd
 import numpy as np
+import uvicorn
 from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, Body
@@ -203,6 +204,9 @@ def health() -> dict:
         },
     }
 
+@app.get("/")
+def read_root():
+    return {"message": "FastAPI running on Vercel"}
 
 @app.post("/predict", response_model=List[PredictResponse])
 def predict(
@@ -276,6 +280,5 @@ def predict(
 
 # Run with: uvicorn app:app --reload --port 8000
 if __name__ == "__main__":
-    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8000,  reload=True)
 
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
