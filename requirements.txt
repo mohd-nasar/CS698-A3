@@ -8,3 +8,5 @@ pandas>=2.1.0
 numpy>=1.26.0
 xgboost>=2.0.0
 typing
+shap
+collections
