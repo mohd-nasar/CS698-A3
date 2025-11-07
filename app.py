@@ -28,16 +28,18 @@ app = FastAPI(title="Student Dropout Prediction API with Explainability")
 
 # ---- CORS Middleware Configuration ----
 origins = [
-    "*",  # Allows all origins
+    "http://localhost:3000",                         # local React dev
+    "https://cs-698-frontend-asgn-5.vercel.app",     # deployed frontend
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_origins=origins,          # restrict to trusted domains
+    allow_credentials=True,         # allow cookies/auth if needed
+    allow_methods=["*"],            # allow all HTTP methods
+    allow_headers=["*"],            # allow all headers
 )
+
 
 # ---- module-level globals (initialized at startup) ----
 ARTIFACTS: dict = {}
