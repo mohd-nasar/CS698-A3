@@ -8,27 +8,27 @@ import pandas as pd
 import numpy as np
 import uvicorn
 import traceback
+import logging
+import math
 from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 import shap  # explainability
 
-# --------------------
-# ✅ FIXED: CORS SETUP
+# ---- logging ----
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("student-dropout-api")
+
 # --------------------
 app = FastAPI(title="Student Dropout Prediction API with Explainability")
 
-# Allow your local and deployed frontend
-origins = [
-    "http://localhost:3000",
-    "https://cs-698-frontend-asgn-5.vercel.app",
-]
-
-# ⚠️ Must come immediately after FastAPI() and before any routes
+# Allow all origins for debugging (change to specific origins later)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,          # only these domains
+    allow_origins=["*"],            # <-- restrict this for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,7 +44,6 @@ LABEL_ENCODER_PATH = os.path.join(ARTIFACT_DIR, "target_label_encoder_v1.joblib"
 METADATA_PATH = os.path.join(ARTIFACT_DIR, "metadata.json")
 BACKGROUND_DATA_PATH = os.path.join(ARTIFACT_DIR, "background_data_sample.csv")
 
-
 # ---- module-level globals (initialized at startup) ----
 ARTIFACTS: dict = {}
 PIPELINE = None
@@ -54,8 +53,7 @@ METADATA: dict = {}
 FEATURE_NAMES: Optional[List[str]] = None
 BACKGROUND_DATA: Optional[pd.DataFrame] = None
 SHAP_EXPLAINER: Optional[shap.Explainer] = None
-CLASS_NAMES: List[str] = ["Class 0", "Class 1"]  # Default, will be overwritten if label encoder exists
-
+CLASS_NAMES: List[str] = ["Class 0", "Class 1"]
 
 # -----------------------
 # Utilities
@@ -69,7 +67,6 @@ def load_json(path: str) -> Optional[dict]:
 
 def load_artifacts() -> dict:
     artifacts: dict = {}
-    # Prefer pipeline if present
     try:
         if os.path.exists(PIPELINE_PATH):
             artifacts["pipeline"] = joblib.load(PIPELINE_PATH)
@@ -84,29 +81,24 @@ def load_artifacts() -> dict:
             elif model is not None:
                 artifacts["estimator_only"] = model
             else:
-                # don't raise here; return empty artifacts and let endpoints handle absence gracefully
                 artifacts["pipeline"] = None
                 artifacts["estimator_only"] = None
     except Exception as exc:
-        # log and continue — avoid crashing startup so health endpoints work
-        print(f"Warning: Failed to load some model artifacts: {exc}")
-        traceback.print_exc()
+        logger.exception("Warning: Failed to load some model artifacts: %s", exc)
 
-    # label encoder & metadata (optional)
     try:
         artifacts["label_encoder"] = joblib.load(LABEL_ENCODER_PATH) if os.path.exists(LABEL_ENCODER_PATH) else None
     except Exception as exc:
-        print(f"Warning: could not load label encoder: {exc}")
+        logger.exception("Warning: could not load label encoder: %s", exc)
         artifacts["label_encoder"] = None
 
     artifacts["metadata"] = load_json(METADATA_PATH) or {}
 
-    # --- NEW: Load SHAP background data ---
     if os.path.exists(BACKGROUND_DATA_PATH):
         try:
             artifacts["background_data"] = pd.read_csv(BACKGROUND_DATA_PATH)
         except Exception as exc:
-            print(f"Warning: failed to read background data CSV: {exc}")
+            logger.exception("Warning: failed to read background data CSV: %s", exc)
             artifacts["background_data"] = None
     else:
         artifacts["background_data"] = None
@@ -115,9 +107,6 @@ def load_artifacts() -> dict:
 
 
 def ensure_dataframe_from_input(data: Any, feature_names: Optional[List[str]] = None) -> pd.DataFrame:
-    """
-    Accept dict / list[dict] / DataFrame and return DataFrame aligned to feature_names.
-    """
     if isinstance(data, pd.DataFrame):
         df = data.copy()
     elif isinstance(data, dict):
@@ -131,16 +120,13 @@ def ensure_dataframe_from_input(data: Any, feature_names: Optional[List[str]] = 
         missing = [c for c in feature_names if c not in df.columns]
         if missing:
             raise ValueError(f"Missing required features: {missing}")
-        # Reorder and keep only required columns
         df = df[feature_names]
 
-    # Attempt to coerce object columns that look numeric
     for col in df.columns:
         if df[col].dtype == object:
             try:
                 df[col] = pd.to_numeric(df[col], errors="raise")
             except Exception:
-                # keep original if cannot convert; model will raise meaningful error later
                 pass
 
     return df
@@ -158,11 +144,17 @@ def predict_from_pipeline(pipeline, df: pd.DataFrame, label_encoder=None) -> Lis
         r: Dict[str, Any] = {"prediction_index": int(pred)}
         if probs is not None:
             r["raw_probs"] = probs[i].tolist()
-            r["probability"] = float(probs[i].max())
+            r["probability"] = float(probs[i].max()) if not (np.isnan(probs[i].max()) or np.isinf(probs[i].max())) else None
             if label_encoder is not None and hasattr(label_encoder, "classes_"):
-                r["class_probabilities"] = {str(label_encoder.classes_[j]): float(prob) for j, prob in enumerate(probs[i])}
+                r["class_probabilities"] = {
+                    str(label_encoder.classes_[j]): (float(prob) if not (np.isnan(prob) or np.isinf(prob)) else None)
+                    for j, prob in enumerate(probs[i])
+                }
             else:
-                r["class_probabilities"] = {f"Class {j}": float(prob) for j, prob in enumerate(probs[i])}
+                r["class_probabilities"] = {
+                    f"Class {j}": (float(prob) if not (np.isnan(prob) or np.isinf(prob)) else None)
+                    for j, prob in enumerate(probs[i])
+                }
         else:
             r["raw_probs"] = None
             r["probability"] = None
@@ -189,11 +181,17 @@ def predict_from_estimator_only(estimator, df_transformed: np.ndarray, label_enc
         r: Dict[str, Any] = {"prediction_index": int(pred)}
         if probs is not None:
             r["raw_probs"] = probs[i].tolist()
-            r["probability"] = float(probs[i].max())
+            r["probability"] = float(probs[i].max()) if not (np.isnan(probs[i].max()) or np.isinf(probs[i].max())) else None
             if label_encoder is not None and hasattr(label_encoder, "classes_"):
-                r["class_probabilities"] = {str(label_encoder.classes_[j]): float(prob) for j, prob in enumerate(probs[i])}
+                r["class_probabilities"] = {
+                    str(label_encoder.classes_[j]): (float(prob) if not (np.isnan(prob) or np.isinf(prob)) else None)
+                    for j, prob in enumerate(probs[i])
+                }
             else:
-                r["class_probabilities"] = {f"Class {j}": float(prob) for j, prob in enumerate(probs[i])}
+                r["class_probabilities"] = {
+                    f"Class {j}": (float(prob) if not (np.isnan(prob) or np.isinf(prob)) else None)
+                    for j, prob in enumerate(probs[i])
+                }
         else:
             r["raw_probs"] = None
             r["probability"] = None
@@ -206,6 +204,58 @@ def predict_from_estimator_only(estimator, df_transformed: np.ndarray, label_enc
                 r["prediction_label"] = classes[int(pred)] if 0 <= int(pred) < len(classes) else None
         results.append(r)
     return results
+
+
+# -----------------------
+# Sanitizer for JSON-safe responses
+# -----------------------
+def sanitize_for_json(obj: Any) -> Any:
+    """
+    Convert numpy/pandas types to Python primitives and replace NaN/Inf with None.
+    Recursively handles dicts, lists, tuples.
+    """
+    # numpy scalar
+    if isinstance(obj, (np.floating, float)):
+        v = float(obj)
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+    if isinstance(obj, (np.integer, int)):
+        return int(obj)
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    if obj is None:
+        return None
+    if isinstance(obj, (str,)):
+        return obj
+
+    # numpy arrays, pandas series -> lists
+    if isinstance(obj, (np.ndarray, pd.Series)):
+        return [sanitize_for_json(v) for v in obj.tolist()]
+
+    # pandas DataFrame -> list of dicts
+    if isinstance(obj, pd.DataFrame):
+        return [sanitize_for_json(row) for _, row in obj.to_dict(orient="records")]
+
+    # dict
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            out[k] = sanitize_for_json(v)
+        return out
+
+    # list / tuple / set
+    if isinstance(obj, (list, tuple, set)):
+        return [sanitize_for_json(v) for v in obj]
+
+    # fallback: use jsonable_encoder to try to convert, then sanitize again
+    try:
+        encoded = jsonable_encoder(obj)
+        if encoded is obj:
+            return obj
+        return sanitize_for_json(encoded)
+    except Exception:
+        return str(obj)
 
 
 # -----------------------
@@ -241,24 +291,30 @@ def startup_load():
                     "Curricular units 2nd sem (grade)", "Curricular units 2nd sem (approved)"
                 ]
 
-        # Initialize SHAP Explainer only if pipeline & background provided
         if PIPELINE is not None and BACKGROUND_DATA is not None:
             try:
-                print("Initializing SHAP Explainer...")
+                logger.info("Initializing SHAP Explainer...")
                 background_df_aligned = BACKGROUND_DATA[FEATURE_NAMES]
                 masker = shap.maskers.Tabular(background_df_aligned, hclustering=False)
                 SHAP_EXPLAINER = shap.Explainer(PIPELINE.predict_proba, masker)
-                print("SHAP Explainer initialized successfully.")
+                logger.info("SHAP Explainer initialized successfully.")
             except Exception as exc:
-                print(f"Warning: Failed to initialize SHAP explainer: {exc}")
-                traceback.print_exc()
+                logger.exception("Warning: Failed to initialize SHAP explainer: %s", exc)
                 SHAP_EXPLAINER = None
         else:
-            print("Warning: SHAP Explainer not initialized. Missing pipeline or background data.")
+            logger.info("Warning: SHAP Explainer not initialized. Missing pipeline or background data.")
     except Exception as exc:
-        # Don't crash the server on startup; log for debugging and continue
-        print(f"Warning: Exception during startup artifact load: {exc}")
-        traceback.print_exc()
+        logger.exception("Warning: Exception during startup artifact load: %s", exc)
+
+
+# Middleware to log exceptions and re-raise so you see full tracebacks in logs
+@app.middleware("http")
+async def log_exceptions(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        logger.exception("Unhandled exception for %s %s: %s", request.method, request.url, e)
+        raise
 
 
 # -----------------------
@@ -273,11 +329,11 @@ class PredictResponse(BaseModel):
 
 
 # -----------------------
-# Routes
+# Routes (all returns sanitized)
 # -----------------------
 @app.get("/health")
-def health() -> dict:
-    return {
+def health() -> JSONResponse:
+    payload = {
         "status": "ok",
         "details": {
             "pipeline_loaded": PIPELINE is not None,
@@ -287,24 +343,19 @@ def health() -> dict:
             "background_data_rows": len(BACKGROUND_DATA) if BACKGROUND_DATA is not None else 0
         },
     }
+    return JSONResponse(content=sanitize_for_json(payload))
 
 
 @app.get("/")
-def read_root():
-    return {"message": "Student Dropout Prediction API with full explainability suite."}
+def read_root() -> JSONResponse:
+    return JSONResponse(content=sanitize_for_json({"message": "Student Dropout Prediction API with full explainability suite."}))
 
 
-# --- NEW: GLOBAL EXPLANATION (REPORT) ----
 @app.get("/model_info")
-def get_model_info():
-    """
-    Safe endpoint returning metadata; provides fallback values if metadata.json missing
-    to avoid 5xx/502 responses that break CORS in clients.
-    """
+def get_model_info() -> JSONResponse:
     global METADATA
     try:
         if not METADATA:
-            # fallback metadata so endpoint always responds
             METADATA = {
                 "data_input_description": "Student academic and macroeconomic features (fallback).",
                 "model_output_description": "Predicted probability of graduation or dropout (fallback).",
@@ -316,7 +367,7 @@ def get_model_info():
                 "model_how_it_works": "XGBoost classifier ensemble (fallback description).",
                 "feature_names": FEATURE_NAMES or []
             }
-        return {
+        resp = {
             "global_explanation_report": {
                 "INPUT": METADATA.get("data_input_description", "No description provided."),
                 "OUTPUT": METADATA.get("model_output_description", "No description provided."),
@@ -325,15 +376,16 @@ def get_model_info():
             },
             "metadata": METADATA
         }
+        return JSONResponse(content=sanitize_for_json(resp))
     except Exception as exc:
-        # Return a 500 only if something truly unexpected happens, but include readable message
+        logger.exception("Failed to return model info: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to return model info: {exc}")
 
 
 @app.post("/predict", response_model=List[PredictResponse])
 def predict(
     payload: Union[Dict[str, Any], List[Dict[str, Any]]] = Body(...),
-) -> List[PredictResponse]:
+) -> JSONResponse:
     if isinstance(payload, dict):
         instances = [payload]
     elif isinstance(payload, list):
@@ -358,7 +410,6 @@ def predict(
     try:
         if PIPELINE is not None:
             out = predict_from_pipeline(PIPELINE, df_in, label_encoder=LABEL_ENCODER)
-            return out
         elif ESTIMATOR_ONLY is not None:
             if os.path.exists(SCALER_PATH) and os.path.exists(PCA_PATH):
                 scaler = joblib.load(SCALER_PATH)
@@ -366,23 +417,20 @@ def predict(
                 X_scaled = scaler.transform(df_in)
                 X_pca = pca.transform(X_scaled)
                 out = predict_from_estimator_only(ESTIMATOR_ONLY, X_pca, label_encoder=LABEL_ENCODER)
-                return out
             else:
                 raise HTTPException(status_code=500, detail="Estimator-only present but scaler/pca missing.")
         else:
             raise HTTPException(status_code=500, detail="No model pipeline or estimator available.")
+        return JSONResponse(content=sanitize_for_json(out))
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("Prediction failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}") from exc
 
 
-# ---- GLOBAL EXPLANATION (FEATURE IMPORTANCE) ----
 @app.get("/global_explanation")
-def global_explanation():
-    """
-    Returns global feature importances for the model.
-    """
+def global_explanation() -> JSONResponse:
     model = None
     if PIPELINE is not None:
         model = PIPELINE.named_steps.get("estimator", None) or PIPELINE.named_steps.get("model")
@@ -397,33 +445,33 @@ def global_explanation():
         if importances is None:
             raise AttributeError("Model does not expose 'feature_importances_'")
 
-        # Handle PCA component case
         if PIPELINE is not None and "pca" in PIPELINE.named_steps:
             pca = PIPELINE.named_steps["pca"]
             n_components = getattr(pca, "n_components_", None)
             if n_components and len(importances) == n_components:
                 component_importance = sorted(
-                    [{"feature": f"PCA_Component_{i}", "importance": float(imp)} for i, imp in enumerate(importances)],
-                    key=lambda x: x["importance"], reverse=True
+                    [{"feature": f"PCA_Component_{i}", "importance": (float(imp) if not (math.isnan(float(imp)) or math.isinf(float(imp))) else None)} for i, imp in enumerate(importances)],
+                    key=lambda x: (x["importance"] if x["importance"] is not None else -float("inf")), reverse=True
                 )
-                return {
+                resp = {
                     "model_type": type(model).__name__,
                     "explanation_type": "Global (PCA Component Importance)",
                     "note": "Model uses PCA; importances are for components.",
                     "top_features": component_importance[:5],
                     "feature_importances": component_importance,
                 }
+                return JSONResponse(content=sanitize_for_json(resp))
 
         if FEATURE_NAMES is None or len(FEATURE_NAMES) != len(importances):
-            feature_importance = [{"feature": f"feature_{i}", "importance": float(v)} for i, v in enumerate(importances)]
+            feature_importance = [{"feature": f"feature_{i}", "importance": (float(v) if not (math.isnan(float(v)) or math.isinf(float(v))) else None)} for i, v in enumerate(importances)]
         else:
             feature_importance = sorted(
-                [{"feature": f, "importance": float(i)} for f, i in zip(FEATURE_NAMES, importances)],
-                key=lambda x: x["importance"], reverse=True
+                [{"feature": f, "importance": (float(i) if not (math.isnan(float(i)) or math.isinf(float(i))) else None)} for f, i in zip(FEATURE_NAMES, importances)],
+                key=lambda x: (x["importance"] if x["importance"] is not None else -float("inf")), reverse=True
             )
 
         top_features = feature_importance[:5]
-        return {
+        resp = {
             "model_type": type(model).__name__,
             "goal": "Predict student graduation/dropout",
             "top_features": top_features,
@@ -431,13 +479,14 @@ def global_explanation():
             "how_it_helps": "Shows which features influence predictions most across all students.",
             "feature_importances": feature_importance,
         }
+        return JSONResponse(content=sanitize_for_json(resp))
     except Exception as e:
+        logger.exception("Global explanation failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Global explanation failed: {e}")
 
 
-# ---- LOCAL EXPLANATION (WHY / WHY NOT) ----
 @app.post("/local_explanation")
-def local_explanation(payload: Dict[str, Any] = Body(...)):
+def local_explanation(payload: Dict[str, Any] = Body(...)) -> JSONResponse:
     if SHAP_EXPLAINER is None:
         raise HTTPException(status_code=503, detail="SHAP Explainer is not available. Check server startup logs.")
 
@@ -471,34 +520,35 @@ def local_explanation(payload: Dict[str, Any] = Body(...)):
             impacts = instance_values_by_class[:, i]
             base_value = instance_base_values[i]
 
-            feature_impacts = [{"feature": f, "impact": float(v)} for f, v in zip(FEATURE_NAMES, impacts)]
-            sorted_impacts = sorted(feature_impacts, key=lambda x: abs(x["impact"]), reverse=True)
+            feature_impacts = [{"feature": f, "impact": (float(v) if not (math.isnan(float(v)) or math.isinf(float(v))) else None)} for f, v in zip(FEATURE_NAMES, impacts)]
+            sorted_impacts = sorted(feature_impacts, key=lambda x: abs(x["impact"]) if x["impact"] is not None else 0, reverse=True)
 
             explanations_by_class.append({
                 "class_name": class_name,
-                "base_value": float(base_value),
+                "base_value": (float(base_value) if not (math.isnan(float(base_value)) or math.isinf(float(base_value))) else None),
                 "top_5_features": sorted_impacts[:5],
                 "all_impacts": feature_impacts
             })
 
-        return {
+        resp = {
             "explanation_type": "Local (SHAP values per class)",
             "instance_input": payload_instance,
             "class_names": CLASS_NAMES,
             "explanations": explanations_by_class,
             "how_it_helps": "Shows the impact of each feature on the probability of each outcome."
         }
+        return JSONResponse(content=sanitize_for_json(resp))
     except Exception as e:
+        logger.exception("Failed to prepare local explanation: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to prepare local explanation: {e}")
 
 
-# ---- ACTIONABLE EXPLANATIONS ----
 @app.post("/actionable_explanations")
 def actionable_explanations(
     payload: Dict[str, Any] = Body(...),
     target_class: str = "Graduate",
     undesirable_class: str = "Dropout"
-):
+) -> JSONResponse:
     if SHAP_EXPLAINER is None:
         raise HTTPException(status_code=503, detail="SHAP Explainer is not available. Check server startup logs.")
 
@@ -507,11 +557,13 @@ def actionable_explanations(
         prediction_result = predict_from_pipeline(PIPELINE, df_in, LABEL_ENCODER)[0]
         pred_label = prediction_result.get("prediction_label")
     except Exception as e:
+        logger.exception("Failed to get prediction for actionable advice: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to get prediction for actionable advice: {e}")
 
     try:
         shap_values = SHAP_EXPLAINER(df_in)
     except Exception as e:
+        logger.exception("Failed to get SHAP values for actionable advice: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to get SHAP values for actionable advice: {e}")
 
     try:
@@ -519,49 +571,50 @@ def actionable_explanations(
             try:
                 target_class_index = CLASS_NAMES.index(target_class)
             except ValueError:
-                return {"recommendation_type": "Error", "message": f"Target class '{target_class}' not found in model classes: {CLASS_NAMES}"}
+                return JSONResponse(content=sanitize_for_json({"recommendation_type": "Error", "message": f"Target class '{target_class}' not found in model classes: {CLASS_NAMES}"}))
 
             impacts = shap_values.values[0, :, target_class_index]
-            feature_impacts = [{"feature": f, "impact": float(v)} for f, v in zip(FEATURE_NAMES, impacts)]
-            sorted_negative_impacts = sorted([f for f in feature_impacts if f["impact"] < 0], key=lambda x: x["impact"])
+            feature_impacts = [{"feature": f, "impact": (float(v) if not (math.isnan(float(v)) or math.isinf(float(v))) else None)} for f, v in zip(FEATURE_NAMES, impacts)]
+            sorted_negative_impacts = sorted([f for f in feature_impacts if f["impact"] is not None and f["impact"] < 0], key=lambda x: x["impact"])
             suggestions = [f"Improve '{f['feature']}' (it strongly decreased your '{target_class}' score)" for f in sorted_negative_impacts[:3]]
             if not suggestions:
                 suggestions = ["Your profile is complex. No simple changes are apparent."]
-            return {
+            return JSONResponse(content=sanitize_for_json({
                 "recommendation_type": "How to Improve (Counterfactual)",
                 "current_prediction": pred_label,
                 "target_prediction": target_class,
                 "message": f"To improve your chances of '{target_class}', focus on these areas:",
                 "suggestions": suggestions
-            }
+            }))
 
         elif pred_label == target_class:
             try:
                 target_class_index = CLASS_NAMES.index(target_class)
             except ValueError:
-                return {"recommendation_type": "Error", "message": f"Target class '{target_class}' not found in model classes: {CLASS_NAMES}"}
+                return JSONResponse(content=sanitize_for_json({"recommendation_type": "Error", "message": f"Target class '{target_class}' not found in model classes: {CLASS_NAMES}"}))
 
             impacts = shap_values.values[0, :, target_class_index]
-            feature_impacts = [{"feature": f, "impact": float(v)} for f, v in zip(FEATURE_NAMES, impacts)]
-            sorted_weakest_links = sorted(feature_impacts, key=lambda x: x["impact"])
+            feature_impacts = [{"feature": f, "impact": (float(v) if not (math.isnan(float(v)) or math.isinf(float(v))) else None)} for f, v in zip(FEATURE_NAMES, impacts)]
+            sorted_weakest_links = sorted(feature_impacts, key=lambda x: (x["impact"] if x["impact"] is not None else float("inf")))
             suggestions = [f"Maintain your performance in '{f['feature']}' (it's your weakest positive factor or a negative factor)" for f in sorted_weakest_links[:3]]
             if not suggestions:
                 suggestions = ["Your profile is strong across the board."]
-            return {
+            return JSONResponse(content=sanitize_for_json({
                 "recommendation_type": "How to Maintain (Robustness)",
                 "current_prediction": pred_label,
                 "message": f"Your '{target_class}' prediction is strong. To maintain it, be mindful of these areas:",
                 "suggestions": suggestions
-            }
+            }))
 
         else:
-            return {
+            return JSONResponse(content=sanitize_for_json({
                 "recommendation_type": "General",
                 "current_prediction": pred_label,
                 "message": f"No specific actions defined for the '{pred_label}' status."
-            }
+            }))
 
     except Exception as e:
+        logger.exception("Failed to generate actionable advice: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to generate actionable advice: {e}")
 
 
