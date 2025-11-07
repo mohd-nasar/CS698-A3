@@ -12,6 +12,26 @@ from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import shap  # explainability
 
+# --------------------
+# ✅ FIXED: CORS SETUP
+# --------------------
+app = FastAPI(title="Student Dropout Prediction API with Explainability")
+
+# Allow your local and deployed frontend
+origins = [
+    "http://localhost:3000",
+    "https://cs-698-frontend-asgn-5.vercel.app",
+]
+
+# ⚠️ Must come immediately after FastAPI() and before any routes
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,          # only these domains
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ---- Artifacts paths ----
 ARTIFACT_DIR = "artifacts"
 PIPELINE_PATH = os.path.join(ARTIFACT_DIR, "student_dropout_pipeline_v1.joblib")
@@ -22,23 +42,6 @@ LABEL_ENCODER_PATH = os.path.join(ARTIFACT_DIR, "target_label_encoder_v1.joblib"
 METADATA_PATH = os.path.join(ARTIFACT_DIR, "metadata.json")
 # --- NEW: Path for SHAP background data ---
 BACKGROUND_DATA_PATH = os.path.join(ARTIFACT_DIR, "background_data_sample.csv")
-
-
-app = FastAPI(title="Student Dropout Prediction API with Explainability")
-
-# ---- CORS Middleware Configuration ----
-origins = [
-    "http://localhost:3000",                         # local React dev
-    "https://cs-698-frontend-asgn-5.vercel.app",     # deployed frontend
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,          # restrict to trusted domains
-    allow_credentials=True,         # allow cookies/auth if needed
-    allow_methods=["*"],            # allow all HTTP methods
-    allow_headers=["*"],            # allow all headers
-)
 
 
 # ---- module-level globals (initialized at startup) ----
