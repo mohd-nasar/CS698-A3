@@ -22,6 +22,9 @@ import shap
 from sklearn.dummy import DummyClassifier
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
+# --- ADDED: Fallback PCA, as it is referenced in the prediction logic ---
+from sklearn.decomposition import PCA
+
 
 # -----------------------
 # Basic logger
@@ -82,7 +85,7 @@ SAMPLE_BACKGROUND_CSV = """Application order,Inflation rate,Application mode,GDP
 """
 
 # -----------------------
-# Utilities
+# Utilities (unchanged, except addition of PCA import)
 # -----------------------
 def load_json(path: str) -> Optional[dict]:
     if os.path.exists(path):
@@ -93,11 +96,16 @@ def load_json(path: str) -> Optional[dict]:
 
 def load_artifacts() -> dict:
     artifacts: dict = {}
+    # --- Simplified/Fixed artifact loading for self-contained operation ---
+    # The actual artifact loading logic remains, but in a self-contained
+    # file, it will likely hit the 'else' and load 'None' for most.
     try:
         if os.path.exists(PIPELINE_PATH):
             logger.info("Loading pipeline from %s", PIPELINE_PATH)
             artifacts["pipeline"] = joblib.load(PIPELINE_PATH)
         else:
+            # NOTE: Assuming SCALER, PCA, and MODEL are loaded independently if pipeline is missing
+            # In a self-contained environment without artifacts/ folder, these will all be None
             scaler = joblib.load(SCALER_PATH) if os.path.exists(SCALER_PATH) else None
             pca = joblib.load(PCA_PATH) if os.path.exists(PCA_PATH) else None
             model = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
@@ -164,6 +172,7 @@ def ensure_dataframe_from_input(data: Any, feature_names: Optional[List[str]] = 
 
 
 def predict_from_pipeline(pipeline, df: pd.DataFrame, label_encoder=None) -> List[Dict[str, Any]]:
+    # ... (unchanged) ...
     results: List[Dict[str, Any]] = []
     probs = None
     try:
@@ -208,6 +217,7 @@ def predict_from_pipeline(pipeline, df: pd.DataFrame, label_encoder=None) -> Lis
 
 
 def predict_from_estimator_only(estimator, df_transformed: np.ndarray, label_encoder=None) -> List[Dict[str, Any]]:
+    # ... (unchanged) ...
     results: List[Dict[str, Any]] = []
     probs = None
     try:
@@ -251,7 +261,7 @@ def predict_from_estimator_only(estimator, df_transformed: np.ndarray, label_enc
 
 
 # -----------------------
-# Sanitizer for JSON-safe responses
+# Sanitizer for JSON-safe responses (unchanged)
 # -----------------------
 def sanitize_for_json(obj: Any) -> Any:
     if isinstance(obj, (np.floating, float)):
@@ -288,25 +298,24 @@ def sanitize_for_json(obj: Any) -> Any:
 
 
 # -----------------------
-# Robust SHAP explainer initialization
+# Robust SHAP explainer initialization (Key Change Area)
 # -----------------------
 def init_shap_explainer():
     global SHAP_EXPLAINER
     SHAP_EXPLAINER = None
 
-    # 1) prefer pipeline + background masker (best)
+    # 1) Prefer general Explainer on the entire PIPELINE (most robust for preprocessors)
     try:
-        if PIPELINE is not None and BACKGROUND_DATA is not None and FEATURE_NAMES is not None:
-            logger.info("SHAP: trying pipeline + Tabular masker")
-            background_df_aligned = BACKGROUND_DATA[FEATURE_NAMES]
-            masker = shap.maskers.Tabular(background_df_aligned, hclustering=False)
-            SHAP_EXPLAINER = shap.Explainer(PIPELINE.predict_proba, masker)
-            logger.info("SHAP: initialized pipeline + masker explainer")
+        if PIPELINE is not None:
+            logger.info("SHAP: trying generic Explainer(PIPELINE.predict_proba)")
+            # Using the entire pipeline's predict_proba makes the explainer handle scaling/PCA
+            SHAP_EXPLAINER = shap.Explainer(PIPELINE.predict_proba, BACKGROUND_DATA[FEATURE_NAMES])
+            logger.info("SHAP: initialized pipeline Explainer")
             return
     except Exception:
-        logger.exception("SHAP pipeline+masker failed")
+        logger.exception("SHAP pipeline Explainer failed")
 
-    # 2) fallback to estimator (tree explainer) or generic explainer
+    # 2) Fallback to TreeExplainer on the estimator (if tree-based)
     estimator = None
     if PIPELINE is not None:
         estimator = PIPELINE.named_steps.get("estimator", None) or PIPELINE.named_steps.get("model")
@@ -317,42 +326,53 @@ def init_shap_explainer():
         logger.info("SHAP: no estimator available for fallback")
         SHAP_EXPLAINER = None
         return
-
-    # Try TreeExplainer(estimator)
-    try:
-        SHAP_EXPLAINER = shap.TreeExplainer(estimator)
-        logger.info("SHAP: TreeExplainer(estimator) succeeded")
-        return
-    except Exception:
-        logger.exception("SHAP: TreeExplainer(estimator) failed")
-
-    # Try booster representations for xgboost wrappers
-    try:
-        if hasattr(estimator, "get_booster"):
-            booster = estimator.get_booster()
-            SHAP_EXPLAINER = shap.TreeExplainer(booster)
-            logger.info("SHAP: TreeExplainer(estimator.get_booster()) succeeded")
+    
+    # Check if the model is tree-based (like XGBoost)
+    if any(cls in type(estimator).__name__ for cls in ["XGB", "LGBM", "CatBoost", "RandomForest", "DecisionTree"]):
+        # Try TreeExplainer(estimator) on pre-transformed background data
+        try:
+            # We need to transform the background data before passing it to the TreeExplainer
+            X_background_transformed = BACKGROUND_DATA[FEATURE_NAMES].values
+            
+            # If a pipeline exists but we're only using the estimator, apply prior transformations manually
+            if PIPELINE is not None and "estimator" in PIPELINE.named_steps:
+                transform_steps = [step[1] for step in PIPELINE.steps if step[0] != "estimator"]
+                X_background_transformed = BACKGROUND_DATA[FEATURE_NAMES].values
+                for transformer in transform_steps:
+                    X_background_transformed = transformer.transform(X_background_transformed)
+            
+            # Since the fallback model is a DummyClassifier, TreeExplainer won't work on it,
+            # but this logic covers the case where a real XGBoost estimator is loaded.
+            # We explicitly use the TreeExplainer to try and catch the optimized SHAP logic.
+            SHAP_EXPLAINER = shap.TreeExplainer(estimator, X_background_transformed)
+            logger.info("SHAP: TreeExplainer(estimator) succeeded")
             return
-    except Exception:
-        logger.exception("SHAP: TreeExplainer(get_booster) failed")
+        except Exception:
+            logger.exception("SHAP: TreeExplainer(estimator) failed. Falling back to Kernel/Sampling.")
 
-    try:
-        if hasattr(estimator, "booster_"):
-            booster = estimator.booster_
-            SHAP_EXPLAINER = shap.TreeExplainer(booster)
-            logger.info("SHAP: TreeExplainer(estimator.booster_) succeeded")
-            return
-    except Exception:
-        logger.exception("SHAP: TreeExplainer(booster_) failed")
-
-    # Generic Explainer using predict_proba
+    # 3) Generic Explainer using predict_proba (works for non-tree models too)
     try:
         if hasattr(estimator, "predict_proba"):
+            # If only the estimator is available, we must pass the transformed background data.
+            # Since the fallback uses a pipeline, we'll try to use that.
+            if PIPELINE is not None and BACKGROUND_DATA is not None and FEATURE_NAMES is not None:
+                # Use the pipeline to transform the background data
+                X_background_transformed = PIPELINE.named_steps["scaler"].transform(BACKGROUND_DATA[FEATURE_NAMES])
+                if "pca" in PIPELINE.named_steps:
+                    X_background_transformed = PIPELINE.named_steps["pca"].transform(X_background_transformed)
+                
+                # Using the background data as the masker for the estimator
+                SHAP_EXPLAINER = shap.Explainer(estimator.predict_proba, X_background_transformed)
+                logger.info("SHAP: generic Explainer(estimator.predict_proba) succeeded using transformed background.")
+                return
+            
+            # If no pipeline transformation steps are explicitly defined/found, use raw data
             SHAP_EXPLAINER = shap.Explainer(estimator.predict_proba)
-            logger.info("SHAP: generic Explainer(estimator.predict_proba) succeeded")
+            logger.info("SHAP: generic Explainer(estimator.predict_proba) succeeded (no transformation assumed).")
             return
+
     except Exception:
-        logger.exception("SHAP: generic Explainer(estimator.predict_proba) failed")
+        logger.exception("SHAP: generic Explainer(estimator.predict_proba) failed.")
 
     logger.info("SHAP could not be initialized; SHAP endpoints will return 503 until fixed")
     SHAP_EXPLAINER = None
@@ -390,6 +410,8 @@ def startup_load():
     if BACKGROUND_DATA is None:
         try:
             BACKGROUND_DATA = pd.read_csv(io.StringIO(SAMPLE_BACKGROUND_CSV))
+            # Align column names in background data
+            BACKGROUND_DATA = BACKGROUND_DATA[FEATURE_NAMES]
             logger.info("Using embedded sample BACKGROUND_DATA (rows=%s)", len(BACKGROUND_DATA))
         except Exception:
             logger.exception("Failed to create embedded BACKGROUND_DATA")
@@ -412,19 +434,30 @@ def startup_load():
         rng = np.random.RandomState(42)
         X = rng.normal(size=(40, len(FEATURE_NAMES)))
         y = rng.choice([0, 1], size=(40,))
+        
+        # Fit the scaler and dummy classifier on synthetic data
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
         dummy = DummyClassifier(strategy="stratified", random_state=42)
-        dummy.fit(X, y)
-        fallback_pipeline = Pipeline([("scaler", StandardScaler()), ("estimator", dummy)])
+        dummy.fit(X_scaled, y)
+        
+        # NOTE: PCA is not needed for the dummy but included for a more realistic fallback structure
+        # Add it to the pipeline if you want to support the PCA step in predict for estimator_only,
+        # otherwise, simplify the pipeline. We stick to the original logic:
+        # "fallback_pipeline = Pipeline([("scaler", StandardScaler()), ("estimator", dummy)])"
+        fallback_pipeline = Pipeline([("scaler", scaler), ("estimator", dummy)])
+        # Re-fit the pipeline (it will re-fit the scaler and dummy classifier steps)
         fallback_pipeline.fit(X, y)
+        
         PIPELINE = fallback_pipeline
         ESTIMATOR_ONLY = None
         logger.info("Fallback pipeline ready.")
-
-    # Attempt to initialize SHAP
+    
+    # --- IMPORTANT: SHAP initialization MUST be last and is now more robust ---
     init_shap_explainer()
 
 
-# Middleware to log exceptions
+# Middleware to log exceptions (unchanged)
 @app.middleware("http")
 async def log_exceptions(request: Request, call_next):
     try:
@@ -435,7 +468,7 @@ async def log_exceptions(request: Request, call_next):
 
 
 # -----------------------
-# Request / Response helpers & routes
+# Request / Response helpers & routes (unchanged)
 # -----------------------
 @app.get("/health")
 def health() -> JSONResponse:
@@ -513,6 +546,9 @@ def predict(payload: Union[Dict[str, Any], List[Dict[str, Any]]] = Body(...)) ->
         if PIPELINE is not None:
             out = predict_from_pipeline(PIPELINE, df_in, label_encoder=LABEL_ENCODER)
         elif ESTIMATOR_ONLY is not None:
+            # NOTE: This branch is technically untested without the artifacts, 
+            # as the startup logic forces the creation of a PIPELINE fallback.
+            # However, the logic is retained here.
             if os.path.exists(SCALER_PATH) and os.path.exists(PCA_PATH):
                 scaler = joblib.load(SCALER_PATH)
                 pca = joblib.load(PCA_PATH)
@@ -533,6 +569,7 @@ def predict(payload: Union[Dict[str, Any], List[Dict[str, Any]]] = Body(...)) ->
 
 @app.get("/global_explanation")
 def global_explanation() -> JSONResponse:
+    # ... (unchanged) ...
     model = None
     if PIPELINE is not None:
         model = PIPELINE.named_steps.get("estimator", None) or PIPELINE.named_steps.get("model")
@@ -549,6 +586,10 @@ def global_explanation() -> JSONResponse:
             if SHAP_EXPLAINER is not None and BACKGROUND_DATA is not None:
                 try:
                     logger.info("Computing SHAP-based global importances (may be slow).")
+                    
+                    # SHAP explainer should be initialized to handle the full pipeline/transformations.
+                    # We pass the raw data here, and the explainer (if correctly initialized as full pipeline)
+                    # will handle the transformations.
                     shap_vals = SHAP_EXPLAINER(BACKGROUND_DATA[FEATURE_NAMES])
                     vals = shap_vals.values
                     if vals.ndim == 3:
@@ -612,11 +653,14 @@ def local_explanation(payload: Union[Dict[str, Any], List[Dict[str, Any]]] = Bod
             raise HTTPException(status_code=422, detail={"error": "Missing required features", "missing": missing})
 
     try:
+        # Ensure df_in has correct features and types
         df_in = ensure_dataframe_from_input(payload_instance, feature_names=FEATURE_NAMES)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
     try:
+        # Pass the raw DataFrame; the SHAP Explainer (if initialized with the full pipeline)
+        # will handle the internal transformation steps before calling predict_proba.
         shap_values = SHAP_EXPLAINER(df_in)
         vals = shap_values.values
         base_vals = shap_values.base_values
@@ -625,8 +669,13 @@ def local_explanation(payload: Union[Dict[str, Any], List[Dict[str, Any]]] = Bod
 
         if vals.ndim == 3:
             for class_idx, class_name in enumerate(CLASS_NAMES):
+                # SHAP is usually (N_samples, N_features, N_classes) or (N_samples, N_features)
+                # We need the impacts for the single instance (0) for the current class (class_idx)
                 impacts = vals[0, :, class_idx]
+                
+                # Base values are usually (N_classes,) or a single float
                 base_value = base_vals[class_idx] if hasattr(base_vals, "__len__") and len(base_vals) > class_idx else base_vals
+                
                 feature_impacts = [{"feature": f, "impact": (float(v) if not (math.isnan(float(v)) or math.isinf(float(v))) else None)} for f, v in zip(FEATURE_NAMES, impacts)]
                 sorted_impacts = sorted(feature_impacts, key=lambda x: abs(x["impact"]) if x["impact"] is not None else 0, reverse=True)
                 explanations_by_class.append({
@@ -636,6 +685,7 @@ def local_explanation(payload: Union[Dict[str, Any], List[Dict[str, Any]]] = Bod
                     "all_impacts": feature_impacts
                 })
         else:
+            # Binary classification where the output is (N_samples, N_features) for one class
             impacts = vals[0, :]
             base_value = base_vals if not (hasattr(base_vals, "__len__") and len(base_vals) > 1) else base_vals[0]
             feature_impacts = [{"feature": f, "impact": (float(v) if not (math.isnan(float(v)) or math.isinf(float(v))) else None)} for f, v in zip(FEATURE_NAMES, impacts)]
@@ -666,6 +716,7 @@ def actionable_explanations(
     target_class: str = "Graduate",
     undesirable_class: str = "Dropout"
 ) -> JSONResponse:
+    # ... (unchanged - relies on working predict and local_explanation/SHAP) ...
     if SHAP_EXPLAINER is None:
         logger.info("SHAP_EXPLAINER None at actionable_explanations; attempting init.")
         init_shap_explainer()
@@ -696,6 +747,7 @@ def actionable_explanations(
                     return JSONResponse(content=sanitize_for_json({"recommendation_type": "Error", "message": f"Target class '{target_class}' not in {CLASS_NAMES}"}))
                 impacts = vals[0, :, target_idx]
             else:
+                # Assuming the single-dimension output is for the 'target_class' or the positive class.
                 impacts = vals[0, :]
 
             feature_impacts = [{"feature": f, "impact": (float(v) if not (math.isnan(float(v)) or math.isinf(float(v))) else None)} for f, v in zip(FEATURE_NAMES, impacts)]
@@ -739,6 +791,7 @@ def actionable_explanations(
 
 @app.get("/explainability_report")
 def explainability_report() -> JSONResponse:
+    # ... (unchanged) ...
     report = {
         "title": "Explainability Report (Student Dropout Prediction)",
         "local_explanation": {
